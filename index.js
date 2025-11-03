@@ -1,9 +1,8 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import OpenAI from "openai";
-import path from "path";
-import { fileURLToPath } from "url";
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const OpenAI = require("openai");
+const path = require("path");
 
 dotenv.config();
 const app = express();
@@ -14,11 +13,7 @@ const client = new OpenAI({
   baseURL: "https://router.huggingface.co/v1",
   apiKey: process.env.HF_API_KEY,
 });
-// ES module fix for __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
-// Serve the embed.js file
 app.use('/embed.js', express.static(path.join(__dirname, 'public/embed.js')));
 
 app.post("/api/chat", async (req, res) => {
