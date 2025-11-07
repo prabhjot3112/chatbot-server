@@ -18,6 +18,8 @@ app.use(cors());
 app.use(express.json());
 
 import { fileURLToPath } from "url";
+import router from './routes/CometAPI.js';
+import chutesRouter from './routes/ChutesAPI.js';
 // import path from "path";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -35,6 +37,13 @@ if (!apiKey || typeof apiKey !== "string") {
 }
 
 const imageClient = new InferenceClient(({}).apiKey);
+
+
+
+
+
+
+export default router;
 
 
 async function query(data) {
@@ -249,6 +258,9 @@ Do NOT invent query parameters for path parameters.
   }
 });
 
+
+app.use('/api',router)
+app.use('/api',chutesRouter)
 
 
 
