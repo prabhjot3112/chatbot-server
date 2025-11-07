@@ -53,9 +53,6 @@ const imageClient = new InferenceClient(({}).apiKey);
 
 
 
-export default router;
-
-
 async function query(data) {
   const response = await fetch(
     "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-dev",
@@ -298,3 +295,5 @@ console.log(data)
 
 const PORT = 3002;
 app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
+
+export default app
