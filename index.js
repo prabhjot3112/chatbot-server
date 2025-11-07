@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import { OpenAI  } from 'openai';
+import jwt from 'jsonwebtoken'
 import path from 'path';
 // const cors = require("cors");
 // const dotenv = require("dotenv");
@@ -77,38 +78,201 @@ app.post("/api/generate-image", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 app.post("/api/chat", async (req, res) => {
   try {
-    const messages = req.body.messages.map((m) => ({
-      role: m.role,
-      content: [{ type: "text", text: m.content }],
-    }));
+    const { endpoints, authToken } = req.body;
 
-    const completion = await client.chat.completions.create({
-      // model: "openai/gpt-oss-safeguard-20b",
-      "model":"katanemo/Arch-Router-1.5B:hf-inference",
-      messages,
-      temperature: 0.7,
-      max_tokens: 200,
-    });
-    console.log('completion:',completion)
-    console.log(completion.choices[0].message)
-    const message = completion.choices[0].message
-    // Hugging Face returns the first assistant message in this path
-    const reply = completion.choices[0].message.content[0].text;
-    console.log('reply is:',reply)
+    // 🔹 Build system prompt
+    const systemPrompt = {
+      role: "system",
+      content: `
+You are a helpful assistant that can access external APIs when necessary.
 
-    res.json({
-  role: message.role,
-  content: message.content,
-  name: message.name,
-});
+You have the following endpoints available:
+${endpoints.map(e => {
+        const pathParams = e.parameters?.path || [];
+        return `- ${e.name}: ${e.description} [${e.method} ${e.url}]` +
+               (pathParams.length ? ` (Path parameters: ${pathParams.join(", ")})` : '');
+      }).join('\n')}
+
+When you need to call an endpoint that has path parameters, you MUST append the path parameters directly into the URL in order, instead of using query parameters.
+Only respond the user in conversational tone....not in a tone where user see that you are thinking or planning steps to execute the response. don't do it.
+User might only see the output as a conversational , not the idea about you and your thinking steps etc. 
+Respond ONLY in this JSON format:
+
+{
+  "action": "call_api",
+  "endpoint": "<endpoint name>",
+  "params": {
+    "include all required path parameters by name here"
+  }
+}
+
+Do NOT invent query parameters for path parameters.
+`
+    };
+
+    let messages = [systemPrompt, ...req.body.messages];
+    let currentResponse = null;
+
+    console.log("🔹 Starting chat with AIMLAPI...");
+
+    // 🔁 Keep looping until there are no more tool calls
+    while (true) {
+      try {
+        // ========== 🧠 AIMLAPI REQUEST ==========
+        const aimlResponse = await fetch("https://api.aimlapi.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.AIMLAPI_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "gpt-4o", // You can change to another model
+            messages,
+            temperature: 0.7,
+          }),
+        });
+
+        currentResponse = await aimlResponse.json();
+        console.log("🧠 AIMLAPI response:", currentResponse);
+
+        const message = currentResponse.choices?.[0]?.message;
+        const content = message?.content || "";
+        const toolCalls = message?.tool_calls || [];
+
+
+        // ======================================================
+        // 💤 OLD OLLAMA CALL (COMMENTED OUT FOR REFERENCE)
+        // ======================================================
+        /*
+        const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-oss:20b-cloud",
+            messages,
+            stream: false
+          }),
+        });
+
+        currentResponse = await ollamaResponse.json();
+        console.log("🧠 Ollama response:", currentResponse);
+
+        const toolCalls = currentResponse.message?.tool_calls || [];
+        const content = currentResponse.message?.content || "";
+        */
+        // ======================================================
+
+        let parsed = null;
+
+        if (toolCalls.length) {
+          const tool = toolCalls[0].function;
+          parsed = { action: tool.name, ...tool.arguments };
+        } else {
+          // fallback: try parse assistant content as JSON
+          try {
+            parsed = JSON.parse(content || '{}');
+          } catch (e) {
+            console.warn("⚠️ Could not parse assistant JSON:", e);
+          }
+        }
+
+        // If no valid tool call, exit loop
+        if (!parsed || parsed.action !== "call_api") break;
+
+        console.log('🔧 Parsed tool call:', parsed);
+
+        const endpoint = endpoints.find(e => e.name === parsed.endpoint);
+        if (!endpoint) {
+          console.warn("⚠️ Unknown endpoint requested:", parsed.endpoint);
+          break;
+        }
+
+        // 🔹 Build full URL (replace path params)
+        let url = endpoint.url;
+        if (parsed.params) {
+          for (const [key, value] of Object.entries(parsed.params)) {
+            url = url.replace(new RegExp(`{${key}}`, "g"), encodeURIComponent(value));
+          }
+        }
+
+        // 🔹 Prepare headers
+        const headers = { "Content-Type": "application/json" };
+        if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
+        // 🔹 Prepare fetch options
+        const method = endpoint.method.toUpperCase();
+        const options = { method, headers };
+
+        if (["GET", "DELETE"].includes(method)) {
+          const queryParams = new URLSearchParams();
+          for (const [key, value] of Object.entries(parsed.params || {})) {
+            if (!url.includes(`{${key}}`) && value !== undefined && value !== null) {
+              queryParams.append(key, value);
+            }
+          }
+          if (queryParams.toString()) {
+            url += (url.includes("?") ? "&" : "?") + queryParams.toString();
+          }
+        } else if (["POST", "PUT", "PATCH"].includes(method)) {
+          console.log('trying ppp request , parsed.params are:', parsed.params);
+          options.body = JSON.stringify(parsed.params || {});
+        }
+
+        console.log("🌐 Fetching API URL:", url, "method:", method);
+        const apiResp = await fetch(url, options);
+        const apiResponseData = await apiResp.json();
+        console.log("📦 API response data:", apiResponseData);
+
+        // 🔹 Feed API result back to model
+        const replySummary = JSON.stringify(parsed);
+        messages.push(
+          { role: "assistant", content: replySummary },
+          {
+            role: "user",
+            content: `Here are the results from the API "${parsed.endpoint}": ${JSON.stringify(apiResponseData)}. Please respond to the user accordingly.`
+          }
+        );
+      } catch (e) {
+        console.error("❌ Error during AIMLAPI loop:", e);
+        return res.json({ msg: 'Error occurred during AIMLAPI processing' });
+      }
+    }
+
+    console.log("✅ Final response to send:", currentResponse);
+    return res.json(currentResponse);
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch from Hugging Face" });
+    console.error("❌ Error in /api/chat:", err);
+    return res.status(500).json({ error: "Failed to fetch from AIMLAPI" });
   }
 });
+
+
+
+
+
+app.post("/api/chat2", async (req, res) => {
+  try{
+    const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "gpt-oss:20b-cloud",
+    messages: req.body.messages,
+    stream:false
+  }),
+});
+const data = await ollamaResponse.json();
+res.json(data)
+console.log(data)
+  }catch (err) {
+    console.error("Error in /api/chat:", err);
+    res.status(500).json({ error: "Failed to fetch from Ollama" });
+  }
+});
+
 
 const PORT = 3002;
 app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
