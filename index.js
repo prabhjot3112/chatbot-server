@@ -14,7 +14,17 @@ import { InferenceClient } from "@huggingface/inference";
 
 dotenv.config();
 const app = express();
-app.use(cors());
+app.use(cors(
+  {
+    origin:[
+      'http://localhost:5173'
+      ,
+      'http://localhost:5174',
+      'https://i-shop31.vercel.app'
+
+    ]
+  }
+));
 app.use(express.json());
 
 import { fileURLToPath } from "url";
