@@ -14,6 +14,7 @@ import { InferenceClient } from "@huggingface/inference";
 
 dotenv.config();
 const app = express();
+
 app.use(cors(
   {
     origin:[
@@ -30,6 +31,7 @@ app.use(express.json());
 import { fileURLToPath } from "url";
 import router from './routes/CometAPI.js';
 import chutesRouter from './routes/ChutesAPI.js';
+import cohereRouter from './routes/CohereAPI.js';
 // import path from "path";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,7 +49,6 @@ if (!apiKey || typeof apiKey !== "string") {
 }
 
 const imageClient = new InferenceClient(({}).apiKey);
-
 
 
 
@@ -73,6 +74,15 @@ async function query(data) {
 
   return await response.blob();
 }
+
+
+
+
+
+app.get('/',(req,res)  => {
+  res.send(`Hey there bud.`)
+})
+
 
 
 app.post("/api/generate-image", async (req, res) => {
@@ -266,31 +276,181 @@ Do NOT invent query parameters for path parameters.
 });
 
 
+
+// app.use('/',(req,res) => res.send('hey'))
 app.use('/api',router)
 app.use('/api',chutesRouter)
+app.use('/api',cohereRouter)
 
 
 
 
-app.post("/api/chat2", async (req, res) => {
-  try{
-    const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    model: "gpt-oss:20b-cloud",
-    messages: req.body.messages,
-    stream:false
-  }),
-});
-const data = await ollamaResponse.json();
-res.json(data)
-console.log(data)
-  }catch (err) {
-    console.error("Error in /api/chat:", err);
-    res.status(500).json({ error: "Failed to fetch from Ollama" });
+
+app.post("/api/ollama/chat", async (req, res) => {
+  try {
+    const { endpoints, authToken } = req.body;
+
+    const systemPrompt = {
+      role: "system",
+      content: `You are a helpful assistant that can access external APIs when necessary.
+
+You have the following endpoints available:
+${endpoints.map(e => {
+        const pathParams = e.parameters?.path || [];
+        return `- ${e.name}: ${e.description} [${e.method} ${e.url}]` +
+               (pathParams.length ? ` (Path parameters: ${pathParams.join(", ")})` : '');
+      }).join('\n')}
+
+When you need to call an endpoint that has path parameters, you MUST append the path parameters directly into the URL in order, instead of using query parameters.
+
+IMPORTANT: Only output in JSON format when you actually need to call an API. If you don't need to call an API, respond naturally in conversational text without any JSON.
+
+Respond ONLY in this JSON format when calling an API:
+{
+  "action": "call_api",
+  "endpoint": "<endpoint name>",
+  "params": {
+    "include all required path parameters by name here"
+  }
+}
+
+Do NOT invent query parameters for path parameters.`
+    };
+
+    let messages = [systemPrompt, ...req.body.messages];
+    let currentResponse = null;
+
+    console.log("🔹 Starting chat with AIMLAPI...");
+
+    while (true) {
+      try {
+        const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-oss:20b-cloud",
+            messages,
+            stream: false
+          }),
+        });
+
+        currentResponse = await ollamaResponse.json();
+        console.log("🧠 Ollama response:", currentResponse);
+
+        const toolCalls = currentResponse.message?.tool_calls || [];
+        const content = currentResponse.message?.content || "";
+
+        let parsed = null;
+
+        if (toolCalls.length) {
+          const tool = toolCalls[0].function;
+          parsed = { action: tool.name, ...tool.arguments };
+        } else {
+          try {
+            parsed = JSON.parse(content || '{}');
+          } catch (e) {
+            console.warn("⚠️ Could not parse assistant JSON:", e);
+          }
+        }
+
+        // If no API call needed, exit loop and return conversational response
+        if (!parsed || parsed.action !== "call_api") {
+          console.log("✅ No API call needed, returning conversational response");
+          return res.json({
+            message: {
+              content: content // Return the natural text response
+            }
+          });
+        }
+
+        console.log('🔧 Parsed tool call:', parsed);
+
+        const endpoint = endpoints.find(e => e.name === parsed.endpoint);
+        if (!endpoint) {
+          console.warn("⚠️ Unknown endpoint requested:", parsed.endpoint);
+          return res.json({
+            message: {
+              content: "I couldn't find that endpoint. Please try again."
+            }
+          });
+        }
+
+        let url = endpoint.url;
+        if (parsed.params) {
+          for (const [key, value] of Object.entries(parsed.params)) {
+            url = url.replace(new RegExp(`{${key}}`, "g"), encodeURIComponent(value));
+          }
+        }
+
+        const headers = { "Content-Type": "application/json" };
+        if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
+        const method = endpoint.method.toUpperCase();
+        const options = { method, headers };
+
+        if (["GET", "DELETE"].includes(method)) {
+          const queryParams = new URLSearchParams();
+          for (const [key, value] of Object.entries(parsed.params || {})) {
+            if (!url.includes(`{${key}}`) && value !== undefined && value !== null) {
+              queryParams.append(key, value);
+            }
+          }
+          if (queryParams.toString()) {
+            url += (url.includes("?") ? "&" : "?") + queryParams.toString();
+          }
+        } else if (["POST", "PUT", "PATCH"].includes(method)) {
+          options.body = JSON.stringify(parsed.params || {});
+        }
+
+        console.log("🌐 Fetching API URL:", url, "method:", method);
+        const apiResp = await fetch(url, options);
+        const apiResponseData = await apiResp.json();
+        console.log("📦 API response data:", apiResponseData);
+
+        const replySummary = JSON.stringify(parsed);
+        messages.push(
+          { role: "assistant", content: replySummary },
+          {
+            role: "user",
+            content: `Here are the results from the API "${parsed.endpoint}": ${JSON.stringify(apiResponseData)}. Please respond to the user accordingly.`
+          }
+        );
+      } catch (e) {
+        console.error("❌ Error during AIMLAPI loop:", e);
+        return res.json({ 
+          message: { 
+            content: 'An error occurred while processing your request.' 
+          } 
+        });
+      }
+    }
+
+  } catch (err) {
+    console.error("❌ Error in /api/chat:", err);
+    return res.status(500).json({ error: "Failed to fetch from AIMLAPI" });
   }
 });
+
+
+// app.post("/api/chat2", async (req, res) => {
+//   try{
+//     const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
+//   method: "POST",
+//   headers: { "Content-Type": "application/json" },
+//   body: JSON.stringify({
+//     model: "gpt-oss:20b-cloud",
+//     messages: req.body.messages,
+//     stream:false
+//   }),
+// });
+// const data = await ollamaResponse.json();
+// res.json(data)
+// console.log(data)
+//   }catch (err) {
+//     console.error("Error in /api/chat:", err);
+//     res.status(500).json({ error: "Failed to fetch from Ollama" });
+//   }
+// });
 
 
 const PORT = 3002;
