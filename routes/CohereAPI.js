@@ -1,6 +1,7 @@
 import express from "express";
 import { CohereClientV2 } from "cohere-ai";
 import fetch from "node-fetch";
+import systemPrompt from "../constants";
 
 const cohere = new CohereClientV2({ token: process.env.CO_API_KEY });
 const cohereRouter = express.Router();
@@ -13,36 +14,13 @@ cohereRouter.post("/cohere/chat", async (req, res) => {
     if (!messages || !Array.isArray(messages) || !messages.length) {
       return res.status(400).json({ error: "Messages array is required" });
     }
+    
+     const systemPrompt = {
+  role: "system",
+  content:systemPrompt(endpoints)
+};
 
-    // Build system prompt
-    const systemPrompt = {
-      role: "system",
-      content: `
-You are a helpful assistant that can access external APIs when necessary.
-
-You have the following endpoints available:
-${endpoints.map(e => {
-        const pathParams = e.parameters?.path || [];
-        return `- ${e.name}: ${e.description} [${e.method} ${e.url}]` +
-               (pathParams.length ? ` (Path parameters: ${pathParams.join(", ")})` : '');
-      }).join("\n")}
-
-When you need to call an endpoint that has path parameters, you MUST append the path parameters directly into the URL in order, instead of using query parameters.
-Respond ONLY in this JSON format:
-
-{
-  "action": "call_api",
-  "endpoint": "<endpoint name>",
-  "params": {
-    "include all required path parameters by name here"
-  }
-}
-
-Do NOT invent query parameters for path parameters.
-`
-    };
-
-    let chatMessages = [systemPrompt, ...messages];
+    let chatMessages = [systemPrompt(endpoints), ...messages];
     let maxIterations = 5; // safety limit
     let iteration = 0;
     let assistantFinalResp = null;

@@ -29,7 +29,8 @@ io.on("connection", (socket) => {
   console.log("🟢 Client connected:", socket.id);
 
   socket.on("user_message", async (data) => {
-    const { endpoints, authToken, messages } = data;
+    const { endpoints, authToken, messages , file } = data;
+    console.log('messages:',messages)
     console.log("💬 Received from user:", messages[messages.length - 1]?.content);
 
     const systemPrompt = {
@@ -74,15 +75,26 @@ Always follow these rules. Do not override or avoid them.`
     while (true) {
       try {
         console.log("🧠 Sending messages to Ollama...");
+        const ollamaBody = {
+        model: "gpt-oss:20b-cloud",
+        messages: convoMessages,
+        stream: false,
+      };
+
+      // 🧩 Add image if present
+      if (file) {
+        // pass the image as base64 input to LLM
+        ollamaBody.messages.push({
+          role: "user",
+          content: "Here’s an image the user sent. Please analyze it if relevant.",
+          images: [file], // 👈 Ollama’s vision models expect array of base64 strings
+        });
+      }
 
         const ollamaResponse = await fetch("http://localhost:11434/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "gpt-oss:20b-cloud",
-            messages: convoMessages,
-            stream: false,
-          }),
+          body: JSON.stringify(ollamaBody),
         });
 
         currentResponse = await ollamaResponse.json();
