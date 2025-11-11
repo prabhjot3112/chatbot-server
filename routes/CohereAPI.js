@@ -1,7 +1,6 @@
 import express from "express";
 import { CohereClientV2 } from "cohere-ai";
 import fetch from "node-fetch";
-import systemPrompt from "../constants";
 
 const cohere = new CohereClientV2({ token: process.env.CO_API_KEY });
 const cohereRouter = express.Router();
